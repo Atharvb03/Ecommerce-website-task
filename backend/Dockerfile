@@ -22,14 +22,20 @@ RUN composer install \
 
 COPY . .
 
-RUN composer dump-autoload --optimize
-
-RUN mkdir -p storage/framework/cache \
+# Create Laravel writable directories BEFORE composer scripts run
+RUN mkdir -p \
+    bootstrap/cache \
+    storage/framework/cache \
     storage/framework/sessions \
     storage/framework/views \
-    bootstrap/cache \
-    && chmod -R 775 storage bootstrap/cache
+    storage/framework/testing \
+    storage/logs
+
+RUN chmod -R 775 bootstrap/cache storage
+
+RUN composer dump-autoload --optimize
 
 EXPOSE 8000
 
-CMD sh -c "php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=${PORT:-8000}"
+CMD ["sh", "-c", "php artisan serve --host=0.0.0.0 --port=${PORT:-8000}"]
+# CMD sh -c "php artisan migrate --force && php artisan serve --host=0.0.0.0 --port=${PORT:-8000}"
