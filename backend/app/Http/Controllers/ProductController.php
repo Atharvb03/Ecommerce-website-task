@@ -9,14 +9,38 @@ use Illuminate\Http\Request;
 class ProductController extends Controller
 {
     public function index() { return Product::with('user:id,name')->latest()->paginate(48); }
+
+    public function cloudinaryHealth()
+    {
+        $cloudinaryInstalled = class_exists('CloudinaryLabs\CloudinaryLaravel\Facades\Cloudinary');
+        $serviceProviderRegistered = app()->getProvider(\CloudinaryLabs\CloudinaryLaravel\CloudinaryServiceProvider::class) !== null;
+
+        return response()->json([
+            'cloudinary_url_configured' => !empty(env('CLOUDINARY_URL')),
+            'cloud_name_configured' => !empty(env('CLOUDINARY_CLOUD_NAME')),
+            'api_key_configured' => !empty(env('CLOUDINARY_API_KEY')),
+            'api_secret_configured' => !empty(env('CLOUDINARY_API_SECRET')),
+            'cloudinary_package_installed' => $cloudinaryInstalled,
+            'cloudinary_service_provider_registered' => $serviceProviderRegistered,
+            'cloudinary_facade_class' => $cloudinaryInstalled ? get_class(Cloudinary::getFacadeRoot()) : 'not_installed',
+            'cloudinary_config_loaded' => !empty(config('cloudinary.cloud_url')),
+            'laravel_version' => app()->version(),
+        ]);
+    }
     public function show(Product $product) { return $product->load('user:id,name'); }
     public function mine(Request $request) { return $request->user()->products()->with('user:id,name')->latest()->get(); }
-    public function store(Request $request) { 
+    public function store(Request $request) {
         try {
             $validatedData = $this->validated($request);
-            $product = $request->user()->products()->create($validatedData); 
-            return response()->json($product->load('user:id,name'), 201); 
-        } catch (\Exception $e) {
+            $product = $request->user()->products()->create($validatedData);
+            return response()->json($product->load('user:id,name'), 201);
+        } catch (\Throwable $e) {
+            \Log::error('Product store failed', [
+                'message' => $e->getMessage(),
+                'exception' => get_class($e),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
             return response()->json(['message' => $e->getMessage()], 500);
         }
     }
@@ -47,6 +71,11 @@ class ProductController extends Controller
 
     private function validated(Request $request, bool $partial = false, ?Product $product = null): array
     {
+        \Log::info('Product validation started', [
+            'partial' => $partial,
+            'has_files' => $request->hasFile('images'),
+        ]);
+
         $required = $partial ? 'nullable' : 'required';
         $data = $request->validate([
             'title' => [$partial ? 'sometimes' : 'required', 'string', 'max:150'],
@@ -61,8 +90,17 @@ class ProductController extends Controller
             'is_best_seller' => ['sometimes', 'boolean'],
             'rating' => ['nullable', 'numeric', 'between:0,5'],
         ]);
+
+        \Log::info('Product validation passed', [
+            'has_images' => isset($data['images']),
+        ]);
         
         if ($request->hasFile('images')) {
+            \Log::info('About to call uploadImagesToCloudinary', [
+                'user_id' => $request->user()->id,
+                'image_count' => count($request->file('images')),
+            ]);
+
             $newImages = $this->uploadImagesToCloudinary($request->file('images'), $request->user()->id);
 
             if (empty($newImages)) {
@@ -84,18 +122,36 @@ class ProductController extends Controller
 
     private function uploadImagesToCloudinary(array $images, int $userId): array
     {
+        \Log::info('Cloudinary upload started', [
+            'user_id' => $userId,
+            'image_count' => count($images),
+        ]);
+
         $uploadedUrls = [];
         $folder = "aurevia/products/{$userId}";
 
         // Log Cloudinary configuration for debugging (without exposing secrets)
         \Log::info('Cloudinary configuration check', [
             'cloud_url_set' => !empty(config('cloudinary.cloud_url')),
-            'cloud_name_set' => !empty(env('CLOUDINARY_CLOUD_NAME')),
+            'cloud_name' => env('CLOUDINARY_CLOUD_NAME', 'NOT_SET'),
+            'cloudinary_url_exists' => !empty(env('CLOUDINARY_URL')),
             'api_key_set' => !empty(env('CLOUDINARY_API_KEY')),
             'api_secret_set' => !empty(env('CLOUDINARY_API_SECRET')),
         ]);
 
-        foreach ($images as $image) {
+        // Log Cloudinary facade class
+        \Log::info('Cloudinary facade check', [
+            'facade_class' => get_class(Cloudinary::getFacadeRoot()),
+        ]);
+
+        foreach ($images as $index => $image) {
+            \Log::info('Cloudinary upload attempt', [
+                'image_index' => $index,
+                'image_path' => $image->getRealPath(),
+                'image_size' => $image->getSize(),
+                'image_mime' => $image->getMimeType(),
+            ]);
+
             try {
                 $upload = Cloudinary::upload($image->getRealPath(), [
                     'folder' => $folder,
@@ -106,16 +162,32 @@ class ProductController extends Controller
                     ],
                 ]);
 
+                \Log::info('Cloudinary upload completed', [
+                    'image_index' => $index,
+                    'upload_object_type' => $upload ? get_class($upload) : 'null',
+                    'has_secure_path' => $upload && method_exists($upload, 'getSecurePath') && $upload->getSecurePath() !== null,
+                ]);
+
                 if ($upload && $upload->getSecurePath()) {
                     $uploadedUrls[] = $upload->getSecurePath();
+                    \Log::info('Cloudinary URL added', [
+                        'image_index' => $index,
+                        'url_added' => true,
+                    ]);
+                } else {
+                    \Log::error('Cloudinary upload returned invalid response', [
+                        'image_index' => $index,
+                        'upload_object' => $upload ? 'exists' : 'null',
+                    ]);
                 }
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
                 // Log the actual exception for debugging
                 \Log::error('Cloudinary upload failed', [
                     'message' => $e->getMessage(),
                     'exception' => get_class($e),
                     'file' => $e->getFile(),
                     'line' => $e->getLine(),
+                    'trace' => $e->getTraceAsString(),
                 ]);
 
                 // Clean up any uploaded images if one fails
@@ -125,6 +197,12 @@ class ProductController extends Controller
                 return [];
             }
         }
+
+        \Log::info('Cloudinary upload finished', [
+            'user_id' => $userId,
+            'total_images' => count($images),
+            'successful_uploads' => count($uploadedUrls),
+        ]);
 
         return $uploadedUrls;
     }

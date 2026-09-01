@@ -17,8 +17,7 @@ RUN composer install \
     --no-dev \
     --no-interaction \
     --prefer-dist \
-    --optimize-autoloader \
-    --no-scripts
+    --optimize-autoloader
 
 COPY . .
 
@@ -33,7 +32,7 @@ RUN mkdir -p \
 
 RUN chmod -R 775 bootstrap/cache storage
 
-RUN composer dump-autoload --optimize
+RUN composer dump-autoload --optimize && php artisan package:discover --ansi && php artisan config:clear
 
 EXPOSE 8000
 
