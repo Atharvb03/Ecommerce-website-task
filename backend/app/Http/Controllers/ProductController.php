@@ -64,14 +64,18 @@ class ProductController extends Controller
         
         if ($request->hasFile('images')) {
             $newImages = $this->uploadImagesToCloudinary($request->file('images'), $request->user()->id);
-            
+
             if (empty($newImages)) {
+                \Log::error('Cloudinary upload returned empty array', [
+                    'user_id' => $request->user()->id,
+                    'image_count' => count($request->file('images')),
+                ]);
                 throw new \Exception('Failed to upload images to Cloudinary');
             }
-            
+
             $data['images'] = $newImages;
             $data['image_url'] = $newImages[0];
-            
+
             // Note: Old images will be deleted in the update method after successful database update
         }
         
@@ -82,7 +86,15 @@ class ProductController extends Controller
     {
         $uploadedUrls = [];
         $folder = "aurevia/products/{$userId}";
-        
+
+        // Log Cloudinary configuration for debugging (without exposing secrets)
+        \Log::info('Cloudinary configuration check', [
+            'cloud_url_set' => !empty(config('cloudinary.cloud_url')),
+            'cloud_name_set' => !empty(env('CLOUDINARY_CLOUD_NAME')),
+            'api_key_set' => !empty(env('CLOUDINARY_API_KEY')),
+            'api_secret_set' => !empty(env('CLOUDINARY_API_SECRET')),
+        ]);
+
         foreach ($images as $image) {
             try {
                 $upload = Cloudinary::upload($image->getRealPath(), [
@@ -93,11 +105,19 @@ class ProductController extends Controller
                         'fetch_format' => 'auto',
                     ],
                 ]);
-                
+
                 if ($upload && $upload->getSecurePath()) {
                     $uploadedUrls[] = $upload->getSecurePath();
                 }
             } catch (\Exception $e) {
+                // Log the actual exception for debugging
+                \Log::error('Cloudinary upload failed', [
+                    'message' => $e->getMessage(),
+                    'exception' => get_class($e),
+                    'file' => $e->getFile(),
+                    'line' => $e->getLine(),
+                ]);
+
                 // Clean up any uploaded images if one fails
                 if (!empty($uploadedUrls)) {
                     $this->deleteCloudinaryImages($uploadedUrls);
@@ -105,7 +125,7 @@ class ProductController extends Controller
                 return [];
             }
         }
-        
+
         return $uploadedUrls;
     }
 
