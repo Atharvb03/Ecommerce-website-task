@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Product;
 use CloudinaryLabs\CloudinaryLaravel\Facades\Cloudinary;
+use Cloudinary\Cloudinary as CloudinarySDK;
 use Illuminate\Http\Request;
 
 class ProductController extends Controller
@@ -14,6 +15,7 @@ class ProductController extends Controller
     {
         $cloudinaryInstalled = class_exists('CloudinaryLabs\CloudinaryLaravel\Facades\Cloudinary');
         $serviceProviderRegistered = app()->getProvider(\CloudinaryLabs\CloudinaryLaravel\CloudinaryServiceProvider::class) !== null;
+        $cloudUrl = config('cloudinary.cloud_url');
 
         return response()->json([
             'cloudinary_url_configured' => !empty(env('CLOUDINARY_URL')),
@@ -23,7 +25,9 @@ class ProductController extends Controller
             'cloudinary_package_installed' => $cloudinaryInstalled,
             'cloudinary_service_provider_registered' => $serviceProviderRegistered,
             'cloudinary_facade_class' => $cloudinaryInstalled ? get_class(Cloudinary::getFacadeRoot()) : 'not_installed',
-            'cloudinary_config_loaded' => !empty(config('cloudinary.cloud_url')),
+            'cloudinary_config_loaded' => !empty($cloudUrl),
+            'cloudinary_cloud_url_set' => !empty($cloudUrl),
+            'cloudinary_cloud_url_prefix' => $cloudUrl ? substr($cloudUrl, 0, 20) . '...' : 'not_set',
             'laravel_version' => app()->version(),
         ]);
     }
@@ -139,6 +143,24 @@ class ProductController extends Controller
             'api_secret_set' => !empty(env('CLOUDINARY_API_SECRET')),
         ]);
 
+        // Get Cloudinary URL and configure instance
+        $cloudUrl = config('cloudinary.cloud_url');
+        if ($cloudUrl) {
+            try {
+                // Create a new Cloudinary instance with the cloud URL
+                $cloudinaryInstance = new CloudinarySDK($cloudUrl);
+                \Log::info('Cloudinary instance created with cloud_url');
+            } catch (\Throwable $e) {
+                \Log::error('Failed to create Cloudinary instance with cloud_url', [
+                    'error' => $e->getMessage(),
+                ]);
+                return [];
+            }
+        } else {
+            \Log::error('CLOUDINARY_URL is not configured');
+            return [];
+        }
+
         // Log Cloudinary facade class
         \Log::info('Cloudinary facade check', [
             'facade_class' => get_class(Cloudinary::getFacadeRoot()),
@@ -153,7 +175,7 @@ class ProductController extends Controller
             ]);
 
             try {
-                $upload = Cloudinary::upload($image->getRealPath(), [
+                $upload = $cloudinaryInstance->uploadApi()->upload($image->getRealPath(), [
                     'folder' => $folder,
                     'resource_type' => 'image',
                     'transformation' => [
@@ -164,20 +186,20 @@ class ProductController extends Controller
 
                 \Log::info('Cloudinary upload completed', [
                     'image_index' => $index,
-                    'upload_object_type' => $upload ? get_class($upload) : 'null',
-                    'has_secure_path' => $upload && method_exists($upload, 'getSecurePath') && $upload->getSecurePath() !== null,
+                    'upload_response_type' => gettype($upload),
+                    'has_secure_url' => isset($upload['secure_url']),
                 ]);
 
-                if ($upload && $upload->getSecurePath()) {
-                    $uploadedUrls[] = $upload->getSecurePath();
+                if (isset($upload['secure_url'])) {
+                    $uploadedUrls[] = $upload['secure_url'];
                     \Log::info('Cloudinary URL added', [
                         'image_index' => $index,
                         'url_added' => true,
                     ]);
                 } else {
-                    \Log::error('Cloudinary upload returned invalid response', [
+                    \Log::error('Cloudinary upload response missing secure_url', [
                         'image_index' => $index,
-                        'upload_object' => $upload ? 'exists' : 'null',
+                        'response_keys' => array_keys($upload),
                     ]);
                 }
             } catch (\Throwable $e) {
@@ -209,12 +231,20 @@ class ProductController extends Controller
 
     private function deleteCloudinaryImages(array $urls): void
     {
+        $cloudUrl = config('cloudinary.cloud_url');
+        if (!$cloudUrl) {
+            \Log::error('Cannot delete images: CLOUDINARY_URL not configured');
+            return;
+        }
+
+        $cloudinaryInstance = new CloudinarySDK($cloudUrl);
+
         foreach ($urls as $url) {
             $publicId = $this->extractCloudinaryPublicId($url);
             if ($publicId) {
                 try {
-                    Cloudinary::destroy($publicId);
-                } catch (\Exception $e) {
+                    $cloudinaryInstance->uploadApi()->destroy($publicId);
+                } catch (\Throwable $e) {
                     // Log error but continue with other images
                     \Log::error("Failed to delete Cloudinary image: {$publicId}", [
                         'error' => $e->getMessage(),
